@@ -1,4 +1,4 @@
-use std::error::Error;
+use linux::LinuxError;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -10,7 +10,7 @@ pub struct ProtocolHandler {
 
 impl ProtocolHandler {
     #[cfg(target_os = "linux")]
-    pub fn register(&self) -> Result<(), Box<dyn Error>> {
+    pub fn register(&self) -> Result<(), LinuxError> {
         linux::register(&self.name, &self.protocol_name)
     }
 }
