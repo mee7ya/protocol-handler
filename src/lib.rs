@@ -13,4 +13,9 @@ impl ProtocolHandler {
     pub fn register(&self) -> Result<(), LinuxError> {
         linux::register(&self.name, &self.protocol_name)
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn unregister(&self) -> Result<(), LinuxError> {
+        linux::unregister(&self.name)
+    }
 }

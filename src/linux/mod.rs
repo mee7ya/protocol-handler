@@ -20,7 +20,7 @@ pub enum LinuxError {
     EnvError(#[from] env::VarError),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 struct DesktopEntry {
     data: IndexMap<String, String>,
 }
@@ -48,10 +48,23 @@ impl TryFrom<String> for DesktopEntry {
             data.insert(split[0].to_string(), split[1].to_string());
         }
 
-        let exe = current_exe()?.to_string_lossy().to_string();
+        let mut exe = current_exe()?.to_string_lossy().to_string();
+        exe.push_str(" %u");
+
         data.entry("Exec".to_string()).or_insert(exe);
 
         Ok(DesktopEntry { data })
+    }
+}
+
+impl TryFrom<&mut File> for DesktopEntry {
+    type Error = LinuxError;
+
+    fn try_from(value: &mut File) -> Result<Self, Self::Error> {
+        let mut content = String::new();
+        value.read_to_string(&mut content)?;
+
+        Self::try_from(content)
     }
 }
 
@@ -69,23 +82,41 @@ impl ToString for DesktopEntry {
 }
 
 impl DesktopEntry {
+    fn get_mime_types(&self) -> Option<Vec<&str>> {
+        match self.data.get("MimeType") {
+            Some(val) => Some(val.split(';').filter(|x| !x.is_empty()).collect()),
+            None => None,
+        }
+    }
+
+    fn find_mime_type(&self, split: &Vec<&str>, starts_with: &str) -> Option<usize> {
+        split.iter().position(|x| x.starts_with(starts_with))
+    }
+
     pub fn insert_scheme_handler(&mut self, entry: String) {
-        match self.data.get_mut("MimeType") {
-            Some(val) => {
-                let mut split: Vec<&str> = val.split(';').filter(|x| !x.is_empty()).collect();
-                let scheme_handler_pos: usize = split
-                    .iter()
-                    .position(|x| x.starts_with("x-scheme-handler/"))
-                    .unwrap_or(usize::MAX);
-                if scheme_handler_pos != usize::MAX {
-                    split[scheme_handler_pos] = &entry
-                } else {
-                    split.push(&entry);
+        match self.get_mime_types() {
+            Some(mut split) => {
+                match self.find_mime_type(&split, "x-scheme-handler/") {
+                    Some(position) => split[position] = &entry,
+                    None => split.push(&entry),
                 }
-                *val = split.join(";");
+                self.data.insert("MimeType".to_string(), split.join(";"));
             }
             None => {
                 self.data.insert("MimeType".to_string(), entry);
+            }
+        }
+    }
+
+    pub fn delete_scheme_handler(&mut self) {
+        if let Some(mut split) = self.get_mime_types() {
+            if let Some(position) = self.find_mime_type(&split, "x-scheme-handler/") {
+                split.remove(position);
+                if !split.is_empty() {
+                    self.data.insert("MimeType".to_string(), split.join(";"));
+                } else {
+                    self.data.shift_remove("MimeType");
+                }
             }
         }
     }
@@ -104,10 +135,7 @@ fn get_file(name: &String) -> Result<File, LinuxError> {
 
 pub fn register(name: &String, protocol_name: &String) -> Result<(), LinuxError> {
     let mut file = get_file(name)?;
-    let mut content = String::new();
-
-    file.read_to_string(&mut content)?;
-    let mut de: DesktopEntry = DesktopEntry::try_from(content)?;
+    let mut de: DesktopEntry = DesktopEntry::try_from(&mut file)?;
 
     de.insert_scheme_handler(format!("x-scheme-handler/{protocol_name}"));
 
@@ -116,9 +144,19 @@ pub fn register(name: &String, protocol_name: &String) -> Result<(), LinuxError>
     Ok(())
 }
 
+pub fn unregister(name: &String) -> Result<(), LinuxError> {
+    let mut file = get_file(name)?;
+    let mut de: DesktopEntry = DesktopEntry::try_from(&mut file)?;
+
+    de.delete_scheme_handler();
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexmap::indexmap;
 
     #[test]
     fn test_invalid_entry() {
@@ -152,10 +190,10 @@ mod tests {
     #[test]
     fn test_to_string() {
         let de: DesktopEntry = DesktopEntry {
-            data: IndexMap::from([
-                ("field1".to_string(), "val1".to_string()),
-                ("field2".to_string(), "val2".to_string()),
-            ]),
+            data: indexmap! {
+                "field1".to_string() => "val1".to_string(),
+                "field2".to_string() => "val2".to_string(),
+            },
         };
         assert_eq!(de.to_string(), "[Desktop Entry]\nfield1=val1\nfield2=val2")
     }
@@ -193,5 +231,27 @@ mod tests {
             de.data.get("MimeType"),
             Some(&"x-scheme-handler/app2".to_string())
         );
+    }
+
+    #[test]
+    fn test_delete_scheme_handler_full() {
+        let content: String =
+            "[Desktop Entry]\nfield1=val1\nfield2=val2\nMimeType=x-scheme-handler/app".to_string();
+        let mut de = DesktopEntry::try_from(content).unwrap();
+        de.delete_scheme_handler();
+        assert!(!de.data.contains_key("MimeType"));
+    }
+
+    #[test]
+    fn test_delete_scheme_handler_partial() {
+        let content: String =
+            "[Desktop Entry]\nfield1=val1\nfield2=val2\nMimeType=x-scheme-handler/app;application/cdf".to_string();
+        let mut de = DesktopEntry::try_from(content).unwrap();
+        de.delete_scheme_handler();
+        assert!(!de
+            .data
+            .get("MimeType")
+            .unwrap()
+            .contains("x-scheme-handler/app"));
     }
 }
